@@ -74,14 +74,35 @@ if [ -d "$PLUGIN_DIR" ]; then
   # production, so fetching a fork's branch failed, `2>/dev/null` hid it, and we
   # printed "Done." over a no-op. A whole Windows test ran against production
   # main and the missing command looked like a rename bug.
-  CURRENT_ORIGIN=$(git -C "$PLUGIN_DIR" remote get-url origin 2>/dev/null || echo "")
-  if [ -n "$CURRENT_ORIGIN" ] && [ "$CURRENT_ORIGIN" != "$REPO_URL" ]; then
-    if git -C "$PLUGIN_DIR" remote set-url origin "$REPO_URL" 2>/dev/null; then
-      echo "  Re-pointed origin to $REPO_URL"
+  # Only touch origin when the override was EXPLICITLY set. Re-pointing on a
+  # default run is destructive: /nsls-setmeup re-runs this installer, and the
+  # desktop session doesn't inherit the tester's env vars — so a default run
+  # would drag a deliberate fork/branch checkout back to production mid-test.
+  if [ -n "${NSLS_TOOLKIT_REPO:-}" ]; then
+    CURRENT_ORIGIN=$(git -C "$PLUGIN_DIR" remote get-url origin 2>/dev/null || echo "")
+    if [ -n "$CURRENT_ORIGIN" ] && [ "$CURRENT_ORIGIN" != "$REPO_URL" ]; then
+      if git -C "$PLUGIN_DIR" remote set-url origin "$REPO_URL" 2>/dev/null; then
+        echo "  Re-pointed origin to $REPO_URL"
+      else
+        echo "  WARNING: could not re-point origin to $REPO_URL — the update below"
+        echo "           will fetch from $CURRENT_ORIGIN instead."
+      fi
     fi
   fi
+  # Never yank a checkout off a branch someone deliberately put it on. Without
+  # this, a default re-provision resets a test branch to main and the tester
+  # silently starts exercising production code.
+  CURRENT_BRANCH=$(git -C "$PLUGIN_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+  if [ -z "${NSLS_TOOLKIT_BRANCH:-}" ] && [ -n "$CURRENT_BRANCH" ] \
+     && [ "$CURRENT_BRANCH" != "HEAD" ] && [ "$CURRENT_BRANCH" != "$REPO_BRANCH" ]; then
+    echo "  This checkout is on branch '$CURRENT_BRANCH', not '$REPO_BRANCH' — leaving it alone."
+    echo "  (Force it with: NSLS_TOOLKIT_BRANCH=$REPO_BRANCH)"
+    SKIP_UPDATE=1
+  fi
   UPDATE_ERR=$(mktemp 2>/dev/null || echo "")
-  if git -C "$PLUGIN_DIR" fetch origin "$REPO_BRANCH" --quiet 2>"${UPDATE_ERR:-/dev/null}" \
+  if [ "${SKIP_UPDATE:-0}" = "1" ]; then
+    :
+  elif git -C "$PLUGIN_DIR" fetch origin "$REPO_BRANCH" --quiet 2>"${UPDATE_ERR:-/dev/null}" \
      && git -C "$PLUGIN_DIR" reset --hard "origin/$REPO_BRANCH" --quiet 2>>"${UPDATE_ERR:-/dev/null}"; then
     :
   else

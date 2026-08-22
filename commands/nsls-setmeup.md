@@ -3,4 +3,4 @@ name: nsls-setmeup
 description: Onboarding for the NSLS Builder Toolkit — checks plugin health, verifies accounts, installs personal productivity skills. Primary onboarding command; /setup also works as an alias.
 ---
 
-Run the `setup` skill. Use the Skill tool to invoke it: `Skill(setup)`.
+Run the `nsls-setmeup` skill. Use the Skill tool to invoke it: `Skill(nsls-setmeup)`.

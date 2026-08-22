@@ -396,14 +396,39 @@ if (Test-Path (Join-Path $PluginDir '.git')) {
     # production, so fetching a fork's branch failed, 2>$null hid it, and we
     # printed "Done." over a no-op. A whole Windows test ran against production
     # main and the missing command looked like a rename bug.
-    $currentOrigin = (& git -C $PluginDir remote get-url origin 2>$null | Out-String).Trim()
-    if ($currentOrigin -and $currentOrigin -ne $RepoUrl) {
-        & git -C $PluginDir remote set-url origin $RepoUrl 2>$null
-        if ($LASTEXITCODE -eq 0) { Write-Host "  Re-pointed origin to $RepoUrl" }
+    # Only touch origin when the override was EXPLICITLY set. Re-pointing on a
+    # default run is destructive: /nsls-setmeup re-runs this installer, and the
+    # desktop session doesn't inherit the tester's env vars - so a default run
+    # would drag a deliberate fork/branch checkout back to production mid-test.
+    if ($env:NSLS_TOOLKIT_REPO) {
+        $currentOrigin = (& git -C $PluginDir remote get-url origin 2>$null | Out-String).Trim()
+        if ($currentOrigin -and $currentOrigin -ne $RepoUrl) {
+            & git -C $PluginDir remote set-url origin $RepoUrl 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Re-pointed origin to $RepoUrl"
+            } else {
+                Write-Host "  WARNING: could not re-point origin to $RepoUrl - the update below"
+                Write-Host "           will fetch from $currentOrigin instead."
+            }
+        }
     }
-    $updateErr = (& git -C $PluginDir fetch origin $RepoBranch --quiet 2>&1 | Out-String)
-    $updateOk  = ($LASTEXITCODE -eq 0)
-    if ($updateOk) {
+    # Never yank a checkout off a branch someone deliberately put it on.
+    $skipUpdate = $false
+    $currentBranch = (& git -C $PluginDir rev-parse --abbrev-ref HEAD 2>$null | Out-String).Trim()
+    if ((-not $env:NSLS_TOOLKIT_BRANCH) -and $currentBranch -and
+        $currentBranch -ne 'HEAD' -and $currentBranch -ne $RepoBranch) {
+        Write-Host "  This checkout is on branch '$currentBranch', not '$RepoBranch' - leaving it alone."
+        Write-Host "  (Force it with: `$env:NSLS_TOOLKIT_BRANCH='$RepoBranch')"
+        $skipUpdate = $true
+    }
+    $updateErr = ''
+    if ($skipUpdate) {
+        $updateOk = $true
+    } else {
+        $updateErr = (& git -C $PluginDir fetch origin $RepoBranch --quiet 2>&1 | Out-String)
+        $updateOk  = ($LASTEXITCODE -eq 0)
+    }
+    if ($updateOk -and -not $skipUpdate) {
         $updateErr += (& git -C $PluginDir reset --hard "origin/$RepoBranch" --quiet 2>&1 | Out-String)
         $updateOk = ($LASTEXITCODE -eq 0)
     }
