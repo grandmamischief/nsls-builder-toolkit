@@ -95,7 +95,7 @@ and framing travel together.
 ### Step 1.5: Reconcile early events (automatic, silent — no question)
 
 The installer fires an install event (and skill events can fire) **before**
-`/setup` runs, attributed to a fallback identity (git email → `$USER@host`).
+`/nsls-setmeup` runs, attributed to a fallback identity (git email → `$USER@host`).
 Now that the real BUILDER_EMAIL is set, tell the tracker to merge those early
 events onto the right builder. Read the *previous* identity the installer
 recorded (`.install-identity`), then POST the reconcile. Skip silently if they
@@ -149,7 +149,7 @@ grep "^GITHUB_USERNAME=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-
 
 Ask (plain words): "Which GitHub account do you open pull requests as? (your
 GitHub username, not your email)". If they don't use GitHub yet, skip cleanly —
-leave the key unset and note they can re-run /setup after their first PR.
+leave the key unset and note they can re-run /nsls-setmeup after their first PR.
 
 Validate before writing — never store an unverified guess:
 
@@ -269,7 +269,7 @@ keys, no tokens to paste. The bundle, in order:
 ### The connect loop (one at a time)
 
 1. **One line on why**, then ask: "Want to connect **<tool>** now? (yes / skip)"
-   - If skip: "No problem — run /setup again anytime to add it." Move on.
+   - If skip: "No problem — run /nsls-setmeup again anytime to add it." Move on.
 2. **If yes, send them to the panel.** Give the **full explanation for connector
    #1 (Slack) only** — and it must teach **where Settings actually is** (nothing
    else in the flow ever does; "Open Settings" with no path is where a
@@ -303,10 +303,10 @@ Once they've connected (or skipped) all six:
 That's the bundle. One thing makes them actually load: fully restart Claude Code
 now (quit and reopen — on Windows, closing the window doesn't quit it, so
 right-click the tray icon → Exit). When it reopens, click **Code**, then run
-/setup again — I'll confirm each connection.
+/nsls-setmeup again — I'll confirm each connection.
 ```
 
-When `/setup` runs again (**after** the restart), verify each connector the
+When `/nsls-setmeup` runs again (**after** the restart), verify each connector the
 builder connected, with a **live read call** (not a registry probe):
 - Slack: read your own identity from the Slack MCP tool ("…user_id is U…").
 - Google Drive: a minimal Drive search/list call.
@@ -317,7 +317,7 @@ builder connected, with a **live read call** (not a registry probe):
 
 Then summarize:
 ```
-Connected: [verified] · Skipped: [deferred] — run /setup anytime to add these.
+Connected: [verified] · Skipped: [deferred] — run /nsls-setmeup anytime to add these.
 ```
 Only if a connector still isn't live **after a restart** is it worth
 re-authorizing ("Slack didn't come through — let's redo just that one"). Never
@@ -342,7 +342,7 @@ Check that superpowers is installed by looking for its skills (e.g.,
   Superpowers isn't installed yet. I can install it for you — want me to?
   ```
   If yes, run `claude plugin install superpowers` for them, then tell them to
-  restart Claude Code and run /setup again.
+  restart Claude Code and run /nsls-setmeup again.
 
 Do NOT check for compound-engineering — it's an optional power-up.
 
@@ -490,7 +490,7 @@ first.
 
 ## Edge Cases
 
-- **Re-running /setup after everything is configured**: detect state, confirm
+- **Re-running /nsls-setmeup after everything is configured**: detect state, confirm
   it's all good, offer /personal-setup. Steps 1 and 4 are idempotent.
 - **Personal-toolkit clone into a dir that already holds `.env`**: `/personal-setup`
   handles this by preserving the existing `.env` across the clone (Step 1 may
@@ -499,4 +499,4 @@ first.
 - **User isn't an NSLS employee**: org toolkit still works; set the email anyway,
   hooks degrade gracefully.
 - **Windows builder skipped Step 4**: zero pings / zero skill events, counters
-  stuck at 0. Re-run /setup, or `install.ps1` directly.
+  stuck at 0. Re-run /nsls-setmeup, or `install.ps1` directly.
