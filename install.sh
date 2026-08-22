@@ -550,61 +550,76 @@ else
   fi
 fi
 
+# Ensure ~/.local/bin is on PATH, idempotently. Shared by the gws step and the
+# nsls-python launcher step below — both install there and both are invoked by
+# bare name, so neither can depend on the other having done this.
+# $1 = what needs it, for the message ("gws", "the document skills").
+ensure_local_bin_on_path() {
+  local what="${1:-the toolkit}"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) return 0 ;;
+  esac
+  if [ "$TEST_MODE" = "1" ]; then
+    echo "  Note: ~/.local/bin isn't on your PATH — add it to use $what (test mode won't touch your shell profile)."
+    return 0
+  fi
+  # Pick the rc file the user's LOGIN SHELL actually reads. Selecting by
+  # file-existence order (zshrc, then bashrc, then bash_profile) wrote the
+  # export into ~/.bashrc for any zsh user who merely happened to have
+  # one — and zsh never sources it, so gws stayed missing while the
+  # installer reported PATH configured.
+  local sh_name rc
+  sh_name=$(basename "${SHELL:-}" 2>/dev/null || true)
+  if [ -z "$sh_name" ] || [ "$sh_name" = "sh" ]; then
+    case "$(uname -s)" in
+      Darwin) sh_name="zsh" ;;
+      *)      sh_name="bash" ;;
+    esac
+  fi
+  rc=""
+  case "$sh_name" in
+    zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+    bash)
+      # bash reads .bashrc for interactive non-login shells, but macOS
+      # Terminal starts login shells, which read .bash_profile instead.
+      if [ -f "$HOME/.bashrc" ]; then rc="$HOME/.bashrc"
+      elif [ -f "$HOME/.bash_profile" ]; then rc="$HOME/.bash_profile"
+      else
+        case "$(uname -s)" in
+          Darwin) rc="$HOME/.bash_profile" ;;
+          *)      rc="$HOME/.bashrc" ;;
+        esac
+      fi
+      ;;
+    *) rc="" ;;  # fish/nu/etc: different syntax — instruct, don't corrupt
+  esac
+  if [ -z "$rc" ]; then
+    echo "  Note: ~/.local/bin isn't on your PATH, and $sh_name needs a syntax this installer doesn't write."
+    echo "        Add ~/.local/bin to your PATH manually to use $what."
+    return 0
+  fi
+  [ -f "$rc" ] || touch "$rc" 2>/dev/null || {
+    echo "  Note: couldn't write $(basename "$rc") — add ~/.local/bin to your PATH manually to use $what."
+    return 0
+  }
+  # Match the exact export line, not the bare substring: a commented-out
+  # export, or an unrelated path that merely contains ".local/bin"
+  # (/opt/app/.local/bin), would satisfy a substring grep and we'd skip
+  # appending — leaving it off PATH while reporting it configured.
+  if ! grep -qE '^[[:space:]]*export PATH="\$HOME/\.local/bin' "$rc" 2>/dev/null; then
+    if { echo ""; echo "# NSLS Builder Toolkit"; echo 'export PATH="$HOME/.local/bin:$PATH"'; } >> "$rc" 2>/dev/null; then
+      echo "  Added ~/.local/bin to PATH in $(basename "$rc") (takes effect in new terminals)."
+    else
+      echo "  Note: couldn't update $(basename "$rc") — add ~/.local/bin to your PATH manually to use $what."
+    fi
+  fi
+  return 0
+}
+
 # PATH fix-up, outside the install branch so it also runs for a gws we FOUND at
 # ~/.local/bin rather than downloaded (that's the whole point of the elif above).
 if [ "$GWS_OK" = "1" ]; then
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *)
-      if [ "$TEST_MODE" = "1" ]; then
-        echo "  Note: ~/.local/bin isn't on your PATH — add it to use gws (test mode won't touch your shell profile)."
-      else
-        # Pick the rc file the user's LOGIN SHELL actually reads. Selecting by
-        # file-existence order (zshrc, then bashrc, then bash_profile) wrote the
-        # export into ~/.bashrc for any zsh user who merely happened to have
-        # one — and zsh never sources it, so gws stayed missing while the
-        # installer reported PATH configured.
-        GWS_SHELL=$(basename "${SHELL:-}" 2>/dev/null || true)
-        if [ -z "$GWS_SHELL" ] || [ "$GWS_SHELL" = "sh" ]; then
-          case "$(uname -s)" in
-            Darwin) GWS_SHELL="zsh" ;;
-            *)      GWS_SHELL="bash" ;;
-          esac
-        fi
-        GWS_RC=""
-        case "$GWS_SHELL" in
-          zsh) GWS_RC="${ZDOTDIR:-$HOME}/.zshrc" ;;
-          bash)
-            # bash reads .bashrc for interactive non-login shells, but macOS
-            # Terminal starts login shells, which read .bash_profile instead.
-            if [ -f "$HOME/.bashrc" ]; then GWS_RC="$HOME/.bashrc"
-            elif [ -f "$HOME/.bash_profile" ]; then GWS_RC="$HOME/.bash_profile"
-            else
-              case "$(uname -s)" in
-                Darwin) GWS_RC="$HOME/.bash_profile" ;;
-                *)      GWS_RC="$HOME/.bashrc" ;;
-              esac
-            fi
-            ;;
-          *) GWS_RC="" ;;  # fish/nu/etc: different syntax — instruct, don't corrupt
-        esac
-        if [ -z "$GWS_RC" ]; then
-          echo "  Note: ~/.local/bin isn't on your PATH, and $GWS_SHELL needs a syntax this installer doesn't write."
-          echo "        Add ~/.local/bin to your PATH manually to use gws."
-        else
-          [ -f "$GWS_RC" ] || touch "$GWS_RC"
-          # Match the exact export line, not the bare substring: a commented-out
-          # export, or an unrelated path that merely contains ".local/bin"
-          # (/opt/app/.local/bin), would satisfy a substring grep and we'd skip
-          # appending — leaving gws off PATH while reporting it configured.
-          if ! grep -qE '^[[:space:]]*export PATH="\$HOME/\.local/bin' "$GWS_RC" 2>/dev/null; then
-            { echo ""; echo "# gws (NSLS Builder Toolkit)"; echo 'export PATH="$HOME/.local/bin:$PATH"'; } >> "$GWS_RC"
-            echo "  Added ~/.local/bin to PATH in $(basename "$GWS_RC") (takes effect in new terminals)."
-          fi
-        fi
-      fi
-      ;;
-  esac
+  ensure_local_bin_on_path "gws"
 fi
 
 # --- Step 3.75: Python libraries for the document skills ---
@@ -653,42 +668,58 @@ if [ -z "$NSLS_PY" ]; then
     echo "        Install Python 3.12 from https://www.python.org/downloads/, then re-run this installer."
   fi
 else
-  PY_VER=$("$NSLS_PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)
+  # EVERY fallible operation below is guarded. This step is best-effort by
+  # design, and `set -euo pipefail` would otherwise turn an unwritable
+  # ~/.local/lib (or a full /tmp) into an aborted toolkit install with a raw
+  # "mkdir: Permission denied" as the builder's last word — verified: it did.
+  PY_VER=$("$NSLS_PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo "unknown")
   # Guard on a real import, never on a directory: /tmp cleanup (and a partial
   # pip run) leaves the dirs behind, so a -d check passes on a gutted install.
   if PYTHONPATH="$PYDEPS_DIR" "$NSLS_PY" -c 'import docx, pptx' &>/dev/null; then
     echo "  Python libraries: already installed (python $PY_VER)"
+  elif ! mkdir -p "$PYDEPS_DIR" 2>/dev/null; then
+    echo "  Note: can't create ~/.local/lib/nsls-pydeps (permissions?) — /gdoc-build"
+    echo "        and /nsls-slides will be unavailable. Everything else installs fine."
   else
-    mkdir -p "$PYDEPS_DIR"
     # --upgrade is load-bearing: without it pip sees a damaged package already
     # in the target, exits 0 without writing, and the next build raises the
     # same ImportError. A PEP 668 "externally-managed-environment" python
     # (Homebrew, Debian) refuses even a --target install, so retry with
     # --break-system-packages — which touches nothing system-wide here,
     # because --target keeps every file inside our own directory.
-    PIP_LOG=$(mktemp)
+    PIP_LOG=$(mktemp 2>/dev/null || echo "")
     if ! "$NSLS_PY" -m pip install --upgrade python-docx python-pptx \
-          --target "$PYDEPS_DIR" -q >"$PIP_LOG" 2>&1; then
+          --target "$PYDEPS_DIR" -q >"${PIP_LOG:-/dev/null}" 2>&1; then
       "$NSLS_PY" -m pip install --upgrade python-docx python-pptx \
-          --target "$PYDEPS_DIR" --break-system-packages -q >"$PIP_LOG" 2>&1 || true
+          --target "$PYDEPS_DIR" --break-system-packages -q >"${PIP_LOG:-/dev/null}" 2>&1 || true
     fi
     if PYTHONPATH="$PYDEPS_DIR" "$NSLS_PY" -c 'import docx, pptx' &>/dev/null; then
       echo "  Python libraries installed to ~/.local/lib/nsls-pydeps (python $PY_VER)"
     else
       echo "  Note: python-docx/python-pptx install failed — /gdoc-build and /nsls-slides"
-      echo "        will prompt you to install them. Last pip output:"
-      tail -3 "$PIP_LOG" 2>/dev/null | sed 's/^/          /'
+      echo "        will be unavailable. Everything else installs fine."
+      if [ -n "$PIP_LOG" ]; then
+        echo "        Last pip output:"
+        { tail -3 "$PIP_LOG" 2>/dev/null || true; } | sed 's/^/          /' || true
+      fi
     fi
-    rm -f "$PIP_LOG"
+    [ -n "$PIP_LOG" ] && rm -f "$PIP_LOG"
   fi
 
   # The launcher every document skill calls: the right interpreter with the
   # toolkit's libraries already importable. One place to fix, not one per skill.
   # Rewritten every run so a Python upgrade (3.12 -> 3.13) self-heals silently
   # on the next install/auto-update instead of stranding the skills.
-  mkdir -p "$HOME/.local/bin"
-  NSLS_PY_ABS=$(command -v "$NSLS_PY")
-  cat > "$HOME/.local/bin/nsls-python" << NSLSPYEOF
+  NSLS_PY_ABS=$(command -v "$NSLS_PY" 2>/dev/null || echo "")
+  LAUNCHER="$HOME/.local/bin/nsls-python"
+  if [ -z "$NSLS_PY_ABS" ] || ! mkdir -p "$HOME/.local/bin" 2>/dev/null; then
+    echo "  Note: couldn't create ~/.local/bin — the document skills will fall back"
+    echo "        to a plain python3. Re-run this installer to fix it."
+  # The braces matter: `cat ... 2>/dev/null` silences cat, but a FAILED
+  # REDIRECTION is reported by the shell itself, so an unwritable ~/.local/bin
+  # leaked a raw "Permission denied" line. Grouping puts the redirect inside the
+  # suppressed scope.
+  elif ! { cat > "$LAUNCHER" << NSLSPYEOF
 #!/bin/sh
 # nsls-python — the Python the NSLS toolkit's document skills run on.
 # Generated by install.sh; regenerated on every install/update. Don't edit.
@@ -702,20 +733,42 @@ else
   PYTHONPATH="\$PYDEPS:/tmp/pptx_deps"
 fi
 export PYTHONPATH
-# Fall back to any python3 on PATH if the recorded interpreter is later removed.
 if [ -x "$NSLS_PY_ABS" ]; then
   exec "$NSLS_PY_ABS" "\$@"
 fi
-exec python3 "\$@"
+# The recorded interpreter is gone (uninstalled, or a brew upgrade moved it).
+# Re-apply the SAME gate the installer used rather than exec'ing blind: a stock
+# macOS stub or an ancient 3.x would otherwise produce a baffling error.
+for _c in python3.12 python3.13 python3.11 python3.14 python3.10 python3; do
+  command -v "\$_c" >/dev/null 2>&1 || continue
+  if "\$_c" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+    exec "\$_c" "\$@"
+  fi
+done
+echo "nsls-python: the Python this was installed with is gone, and no Python 3.10+" >&2
+echo "replacement is on PATH. Re-run the NSLS toolkit installer to repair it." >&2
+exit 127
 NSLSPYEOF
-  chmod +x "$HOME/.local/bin/nsls-python"
-  echo "  nsls-python launcher ready (the document skills call this)."
-  # PATH for ~/.local/bin is handled by the gws step above; if gws didn't
-  # install, say it plainly rather than leaving a launcher nobody can reach.
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) [ "$GWS_OK" = "1" ] || echo "        (Add ~/.local/bin to your PATH to call it directly.)" ;;
-  esac
+  } 2>/dev/null
+  then
+    echo "  Note: couldn't write the nsls-python launcher — re-run this installer to fix it."
+  elif ! chmod +x "$LAUNCHER" 2>/dev/null; then
+    echo "  Note: couldn't make the nsls-python launcher executable — re-run this installer."
+  # Claim readiness only after the launcher ACTUALLY imports both libraries.
+  # Reporting "ready" off a successful file-write is the worst outcome here: the
+  # installer looks green and the builder still hits a raw import traceback.
+  elif "$LAUNCHER" -c 'import docx, pptx' &>/dev/null; then
+    echo "  nsls-python launcher ready (the document skills call this)."
+  else
+    echo "  Note: the nsls-python launcher was written but can't import the libraries."
+    echo "        /gdoc-build and /nsls-slides will be unavailable; everything else is fine."
+  fi
+
+  # Put ~/.local/bin on PATH for OUR launcher, independent of whether the gws
+  # step above happened to do it — the skills invoke `nsls-python` by bare name,
+  # so a machine that already had gws elsewhere would otherwise get a launcher
+  # nothing can reach.
+  ensure_local_bin_on_path "the document skills"
 fi
 
 # --- Step 3.8: Node.js check (the signal MCP server needs it) ---

@@ -33,10 +33,19 @@ The fastest path for a builder asking for a Google Doc:
    profile, validates the client, and runs the one-time consent if needed. A 403 naming a
    project other than `nsls-gdocs-skill`, or a gws exit 2, means run it (again).
 1. **Confirm branding.** "NSLS or Society?" Default NSLS unless the doc is for `thesociety.org` audiences.
-2. **Confirm the Python libraries.** The installer provisions these, so this is normally a 1-line no-op:
+2. **Preflight the Python libraries — and STOP if it fails.** The installer provisions these, so this
+   is normally a 1-line no-op:
    ```bash
-   nsls-python -c 'import docx' 2>/dev/null || echo "run the toolkit installer to provision python-docx"
+   nsls-python -c 'import docx' && echo PREFLIGHT_OK
    ```
+   **If you don't see `PREFLIGHT_OK`, do not continue to step 3.** Tell the builder in one plain
+   sentence that the document tooling needs repairing and re-run the toolkit installer for them:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/thensls/nsls-builder-toolkit/main/install.sh | bash
+   ```
+   Then preflight again. Never let the builder see a raw `ModuleNotFoundError`, an import traceback,
+   or a `command not found` — those are ours to catch here, and this preflight is the only thing
+   standing between them and one. Do not "try anyway and see."
    `nsls-python` is the launcher `install.sh` writes to `~/.local/bin` — the right interpreter with
    `~/.local/lib/nsls-pydeps` already on `PYTHONPATH`. **Use it instead of naming a Python version.**
    Hardcoding `python3.12` is what used to break this skill: plenty of Macs ship only a newer 3.x, and

@@ -166,6 +166,18 @@ Claude drafts the slide structure as JSON. Work with Kevin to define:
 
 ### Step 2 — Generate the .pptx (and optionally a PDF)
 
+**Preflight first, and STOP if it fails:**
+
+```bash
+nsls-python -c 'import pptx' && echo PREFLIGHT_OK
+```
+
+If you don't see `PREFLIGHT_OK`, don't run the build commands below — the builder would get a raw
+import traceback or `command not found`. Say in one plain sentence that the slide tooling needs
+repairing, re-run the toolkit installer for them
+(`curl -fsSL https://raw.githubusercontent.com/thensls/nsls-builder-toolkit/main/install.sh | bash`),
+then preflight again. See "Python environment" under Setup Requirements.
+
 ```bash
 # Society brand (default)
 echo '<json>' | nsls-python \
