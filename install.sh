@@ -8,7 +8,7 @@
 # What this does:
 #   1. Installs the NSLS org skills (local plugin)
 #   2. Installs superpowers + compound-engineering plugins (marketplace)
-#   3. Tells you to run /setup to connect your tools
+#   3. Tells you to run /nsls-setmeup to connect your tools
 
 set -euo pipefail
 
@@ -227,7 +227,7 @@ fi
 [ -z "$INSTALL_EMAIL" ] && INSTALL_EMAIL=$(git config user.email 2>/dev/null || true)
 [ -z "$INSTALL_EMAIL" ] && INSTALL_EMAIL="${USER:-unknown}@$(hostname -s 2>/dev/null || echo unknown)"
 
-# Persist the EXACT provisional identity used for these early events so /setup
+# Persist the EXACT provisional identity used for these early events so /nsls-setmeup
 # Step 1.5 can reconcile them WITHOUT recomputing (parity with install.ps1).
 # Written beside the toolkit, not in .env (which doesn't exist yet); gitignored.
 # Idempotent — overwritten with the current value on every run.
@@ -364,7 +364,7 @@ if [ -n "$CLAUDE_BIN" ]; then
 else
   echo ""
   echo "  Could not find the 'claude' CLI in PATH."
-  echo "  After your next Claude Code session, run /setup — it will detect"
+  echo "  After your next Claude Code session, run /nsls-setmeup — it will detect"
   echo "  missing plugins and give you the install commands."
   echo ""
   echo "  Or run these manually:"
@@ -607,6 +607,117 @@ if [ "$GWS_OK" = "1" ]; then
   esac
 fi
 
+# --- Step 3.75: Python libraries for the document skills ---
+#
+# /gdoc-build (python-docx) and /nsls-slides (python-pptx) are dead on arrival
+# without these, and until now install.sh provisioned neither — so a builder's
+# first /gdoc-build ended in "ModuleNotFoundError: No module named 'docx'" or
+# "python3.12: command not found", and Claude told them to go install Python.
+# install.ps1 has always done this on Windows (Step 0); this is the Mac/Linux
+# half of that parity.
+#
+# Two things make it silent:
+#   1. Libraries land in the DURABLE ~/.local/lib/nsls-pydeps, not /tmp (macOS
+#      /tmp cleanup gutted the old /tmp/pptx_deps between sessions).
+#   2. A tiny `nsls-python` launcher pins the interpreter choice ONCE, here,
+#      instead of every skill hardcoding python3.12 and breaking on the many
+#      Macs that only ship a newer 3.x. python-docx/pptx are pure-Python and
+#      run fine on 3.10-3.14.
+# Best-effort throughout: a failure here must never abort the toolkit install.
+
+echo ""
+echo "Installing Python libraries for the document skills..."
+
+PYDEPS_DIR="$HOME/.local/lib/nsls-pydeps"
+NSLS_PY=""
+
+# Prefer 3.12 (the most-tested version across the toolkit's skills), then walk
+# newer-to-older. Plain `python3` is the last resort and only if it's >= 3.10.
+for candidate in python3.12 python3.13 python3.11 python3.14 python3.10 python3; do
+  command -v "$candidate" &>/dev/null || continue
+  # Stock-macOS /usr/bin/python3 without Command Line Tools is a stub that
+  # prompts a GUI install popup, so gate on actually running.
+  if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' &>/dev/null; then
+    NSLS_PY="$candidate"
+    break
+  fi
+done
+
+if [ -z "$NSLS_PY" ]; then
+  # No usable interpreter. Say what breaks, don't auto-install one: brew/pkg
+  # installs are slow and can raise OS permission prompts mid-install.
+  echo "  Note: no Python 3.10+ found — /gdoc-build and /nsls-slides will be unavailable."
+  if command -v brew &>/dev/null; then
+    echo "        Install it:  brew install python@3.12   (then re-run this installer)"
+  else
+    echo "        Install Python 3.12 from https://www.python.org/downloads/, then re-run this installer."
+  fi
+else
+  PY_VER=$("$NSLS_PY" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))' 2>/dev/null)
+  # Guard on a real import, never on a directory: /tmp cleanup (and a partial
+  # pip run) leaves the dirs behind, so a -d check passes on a gutted install.
+  if PYTHONPATH="$PYDEPS_DIR" "$NSLS_PY" -c 'import docx, pptx' &>/dev/null; then
+    echo "  Python libraries: already installed (python $PY_VER)"
+  else
+    mkdir -p "$PYDEPS_DIR"
+    # --upgrade is load-bearing: without it pip sees a damaged package already
+    # in the target, exits 0 without writing, and the next build raises the
+    # same ImportError. A PEP 668 "externally-managed-environment" python
+    # (Homebrew, Debian) refuses even a --target install, so retry with
+    # --break-system-packages — which touches nothing system-wide here,
+    # because --target keeps every file inside our own directory.
+    PIP_LOG=$(mktemp)
+    if ! "$NSLS_PY" -m pip install --upgrade python-docx python-pptx \
+          --target "$PYDEPS_DIR" -q >"$PIP_LOG" 2>&1; then
+      "$NSLS_PY" -m pip install --upgrade python-docx python-pptx \
+          --target "$PYDEPS_DIR" --break-system-packages -q >"$PIP_LOG" 2>&1 || true
+    fi
+    if PYTHONPATH="$PYDEPS_DIR" "$NSLS_PY" -c 'import docx, pptx' &>/dev/null; then
+      echo "  Python libraries installed to ~/.local/lib/nsls-pydeps (python $PY_VER)"
+    else
+      echo "  Note: python-docx/python-pptx install failed — /gdoc-build and /nsls-slides"
+      echo "        will prompt you to install them. Last pip output:"
+      tail -3 "$PIP_LOG" 2>/dev/null | sed 's/^/          /'
+    fi
+    rm -f "$PIP_LOG"
+  fi
+
+  # The launcher every document skill calls: the right interpreter with the
+  # toolkit's libraries already importable. One place to fix, not one per skill.
+  # Rewritten every run so a Python upgrade (3.12 -> 3.13) self-heals silently
+  # on the next install/auto-update instead of stranding the skills.
+  mkdir -p "$HOME/.local/bin"
+  NSLS_PY_ABS=$(command -v "$NSLS_PY")
+  cat > "$HOME/.local/bin/nsls-python" << NSLSPYEOF
+#!/bin/sh
+# nsls-python — the Python the NSLS toolkit's document skills run on.
+# Generated by install.sh; regenerated on every install/update. Don't edit.
+# Interpreter resolved at install time: $NSLS_PY_ABS (python $PY_VER)
+PYDEPS="\$HOME/.local/lib/nsls-pydeps"
+# Keep any caller-supplied PYTHONPATH, ours first. /tmp/pptx_deps trails as a
+# legacy fallback for machines that still have the old ephemeral install.
+if [ -n "\${PYTHONPATH:-}" ]; then
+  PYTHONPATH="\$PYDEPS:\$PYTHONPATH:/tmp/pptx_deps"
+else
+  PYTHONPATH="\$PYDEPS:/tmp/pptx_deps"
+fi
+export PYTHONPATH
+# Fall back to any python3 on PATH if the recorded interpreter is later removed.
+if [ -x "$NSLS_PY_ABS" ]; then
+  exec "$NSLS_PY_ABS" "\$@"
+fi
+exec python3 "\$@"
+NSLSPYEOF
+  chmod +x "$HOME/.local/bin/nsls-python"
+  echo "  nsls-python launcher ready (the document skills call this)."
+  # PATH for ~/.local/bin is handled by the gws step above; if gws didn't
+  # install, say it plainly rather than leaving a launcher nobody can reach.
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) [ "$GWS_OK" = "1" ] || echo "        (Add ~/.local/bin to your PATH to call it directly.)" ;;
+  esac
+fi
+
 # --- Step 3.8: Node.js check (the signal MCP server needs it) ---
 # Instruct + degrade (matches this script's style); don't auto-install Node.
 echo ""
@@ -769,7 +880,7 @@ else
   echo "  NOTE: the 'claude' CLI wasn't found, so these were SKIPPED:"
   echo "    - plugins (superpowers, compound-engineering) — NOT installed"
   echo "    - bundled MCP servers (e.g. signal) — NOT registered"
-  echo "  Finish them after your first Claude Code session by running:  /setup"
+  echo "  Finish them after your first Claude Code session by running:  /nsls-setmeup"
   echo ""
 fi
 if [ "$TEST_MODE" != "1" ]; then
@@ -792,7 +903,7 @@ if [ "$TEST_MODE" = "1" ]; then
   echo ""
   echo "       CLAUDE_CONFIG_DIR=\"$CONFIG_DIR\" claude"
   echo ""
-  echo "  2. Try it: say  /setup  (or  open day )  as a first-time user would."
+  echo "  2. Try it: say  /nsls-setmeup  (or  open day )  as a first-time user would."
   echo ""
   echo "  3. Reset back to a brand-new user (wipes the test install only):"
   echo ""
@@ -808,7 +919,7 @@ else
   echo "       Terminal:    open a new window and type  cc"
   echo "     (A restart is required to load the MCP servers and hooks.)"
   echo ""
-  echo "  2. Say:  /setup"
+  echo "  2. Say:  /nsls-setmeup"
   echo "     This connects your tools (Slack, Google Drive, Calendar, Gmail,"
   echo "     Fathom — one at a time, with you) and optionally installs personal"
   echo "     productivity skills (daily planning, weekly reviews, project logging)."
