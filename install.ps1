@@ -143,6 +143,9 @@ $PrereqReport = @()
 $HasWinget = [bool](Get-Command winget -ErrorAction SilentlyContinue)
 $IsElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $PyExe  = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
+# Defined here, before the pip step, because BOTH the --target retry below and
+# the nsls-python shim further down must point at the same durable directory.
+$PyDepsDir = Join-Path $env:LOCALAPPDATA 'nsls-pydeps'
 $GwsDir = Join-Path $env:LOCALAPPDATA 'Programs\gws'
 $GwsExe = Join-Path $GwsDir 'gws.exe'
 
@@ -156,8 +159,26 @@ if (-not (Test-Path $PyExe)) {
 # python-docx (/gdoc-build) + python-pptx (/nsls-slides). pip is idempotent - a
 # no-op when already satisfied. python-pptx was missing here, so /nsls-slides
 # failed on Windows with ModuleNotFoundError even on a fully provisioned machine.
+$PipErr = ''
 if (Test-Path $PyExe) {
-    try { & $PyExe -m pip install --user python-docx python-pptx --quiet 2>$null | Out-Null } catch {}
+    # Capture, never discard. `2>$null | Out-Null` inside an empty catch{} meant a
+    # real pip failure (cert/proxy/Defender - "source could not be verified")
+    # produced a bare "libraries missing" warning with no cause. The message is
+    # the whole diagnostic; keep it and print it in the prereq report.
+    try {
+        $PipErr = (& $PyExe -m pip install --user python-docx python-pptx 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0) { $PipErr = '' }
+    } catch { $PipErr = $_.Exception.Message }
+
+    # Fallback: --user fails on some machines (roaming profiles, PEP 668-ish
+    # setups, locked-down site dirs). Retry into the SAME durable dir the
+    # nsls-python shim already puts on PYTHONPATH, so a success here is usable.
+    if ($PipErr) {
+        try {
+            $retry = (& $PyExe -m pip install --upgrade python-docx python-pptx --target $PyDepsDir 2>&1 | Out-String)
+            if ($LASTEXITCODE -eq 0) { $PipErr = '' } else { $PipErr += "`n--target retry also failed:`n$retry" }
+        } catch { $PipErr += "`n--target retry threw: $($_.Exception.Message)" }
+    }
 }
 
 # --- (a2) nsls-python shim - the launcher the document skills call ---
@@ -181,7 +202,7 @@ if (Test-Path $PyExe) {
     try {
         $ShimDir = Join-Path $env:LOCALAPPDATA 'Programs\nsls-bin'
         New-Item -ItemType Directory -Force -Path $ShimDir | Out-Null
-        $PyDeps  = Join-Path $env:LOCALAPPDATA 'nsls-pydeps'
+        $PyDeps  = $PyDepsDir
         $shim = @"
 @echo off
 REM nsls-python - the Python the NSLS toolkit's document skills run on.
@@ -253,8 +274,12 @@ if (Test-Path $PyExe) {
     $pyVer  = Invoke-Native $PyExe @('--version')
     # Probe BOTH libraries: python-docx powers /gdoc-build, python-pptx powers
     # /nsls-slides. Reporting only docx let a broken /nsls-slides ship green.
-    $docxOk = (Invoke-Native $PyExe @('-c', 'import docx; print("ok")')) -match 'ok'
-    $pptxOk = (Invoke-Native $PyExe @('-c', 'import pptx; print("ok")')) -match 'ok'
+    # Probe through the SHIM when it exists, falling back to $PyExe. The shim is
+    # what the skills actually call, and it puts nsls-pydeps on PYTHONPATH - so a
+    # bare $PyExe probe reported "missing" for a perfectly good --target install.
+    $probe = if ($ShimOk -and (Test-Path $ShimPath)) { $ShimPath } else { $PyExe }
+    $docxOk = (Invoke-Native $probe @('-c', 'import docx; print("ok")')) -match 'ok'
+    $pptxOk = (Invoke-Native $probe @('-c', 'import pptx; print("ok")')) -match 'ok'
     # Verify through the SHIM the skills actually call, not just $PyExe. A shim
     # that exists but can't run (stale content, unreachable PATH, bad quoting)
     # is the worst outcome: the report reads green and every /gdoc-build still
@@ -271,6 +296,13 @@ if (Test-Path $PyExe) {
         if (-not $pptxOk) { $missing += 'python-pptx' }
         if ($missing.Count -gt 0) {
             $PrereqReport += "  [warn] Python: $pyVer but $($missing -join ' + ') missing - run: `"$PyExe`" -m pip install --user $($missing -join ' ')"
+            # Show WHY. Without this the builder (and I) had a symptom and no cause.
+            if ($PipErr.Trim()) {
+                $PrereqReport += "                  pip failed. Last lines:"
+                ($PipErr.Trim() -split "`n" | Select-Object -Last 4) | ForEach-Object {
+                    $PrereqReport += "                    $($_.Trim())"
+                }
+            }
         }
         # Only call out the shim when it's the DISTINCT problem - if a library is
         # missing the shim can't import either, and two warnings for one cause
@@ -359,12 +391,46 @@ Write-Host "Step 1: Installing org skills..."
 New-Item -ItemType Directory -Path $LocalDir -Force | Out-Null
 if (Test-Path (Join-Path $PluginDir '.git')) {
     Write-Host "  Updating existing installation..."
-    & git -C $PluginDir fetch origin $RepoBranch --quiet 2>$null
-    & git -C $PluginDir reset --hard "origin/$RepoBranch" --quiet 2>$null
+    # Re-point origin at $RepoUrl BEFORE fetching. Without this, NSLS_TOOLKIT_REPO
+    # was honored only on a fresh clone: an existing checkout's origin is
+    # production, so fetching a fork's branch failed, 2>$null hid it, and we
+    # printed "Done." over a no-op. A whole Windows test ran against production
+    # main and the missing command looked like a rename bug.
+    $currentOrigin = (& git -C $PluginDir remote get-url origin 2>$null | Out-String).Trim()
+    if ($currentOrigin -and $currentOrigin -ne $RepoUrl) {
+        & git -C $PluginDir remote set-url origin $RepoUrl 2>$null
+        if ($LASTEXITCODE -eq 0) { Write-Host "  Re-pointed origin to $RepoUrl" }
+    }
+    $updateErr = (& git -C $PluginDir fetch origin $RepoBranch --quiet 2>&1 | Out-String)
+    $updateOk  = ($LASTEXITCODE -eq 0)
+    if ($updateOk) {
+        $updateErr += (& git -C $PluginDir reset --hard "origin/$RepoBranch" --quiet 2>&1 | Out-String)
+        $updateOk = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $updateOk) {
+        # Loud, not silent: the install continues, but never claim it updated.
+        Write-Host "  WARNING: could not update to '$RepoBranch' - the existing checkout is UNCHANGED."
+        Write-Host "           You are running whatever was already installed, not $RepoBranch."
+        if ($updateErr.Trim()) {
+            ($updateErr.Trim() -split "`n" | Select-Object -Last 3) | ForEach-Object { Write-Host "           $_" }
+        }
+    }
 } else {
     Write-Host "  Cloning plugin..."
     & git clone --branch $RepoBranch $RepoUrl $PluginDir --quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  ERROR: clone of '$RepoBranch' from $RepoUrl failed."
+        if ($RunningFromFile) { exit 1 } else { return }
+    }
 }
+# Print exactly what landed. This is the installer's own receipt: with a silent
+# update failure it was impossible to tell which code you were running.
+# The commit, not the branch name: `reset --hard origin/<branch>` leaves the
+# LOCAL branch called "main" while holding another branch's content, so printing
+# the branch name actively misleads. The hash + subject is unambiguous.
+$installedRef = (& git -C $PluginDir log -1 --format='%h %s' 2>$null | Out-String).Trim()
+if (-not $installedRef) { $installedRef = 'unknown' }
+Write-Host "  Installed commit: $installedRef"
 Write-Host "  Done."
 
 # --- Find the claude CLI (best-effort; several steps need it) ---

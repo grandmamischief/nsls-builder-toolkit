@@ -69,12 +69,44 @@ mkdir -p "$CONFIG_DIR/local-plugins"
 
 if [ -d "$PLUGIN_DIR" ]; then
   echo "  Updating existing installation..."
-  git -C "$PLUGIN_DIR" fetch origin "$REPO_BRANCH" --quiet 2>/dev/null
-  git -C "$PLUGIN_DIR" reset --hard "origin/$REPO_BRANCH" --quiet 2>/dev/null
+  # Re-point origin at $REPO_URL BEFORE fetching. Without this, NSLS_TOOLKIT_REPO
+  # was honored only on a fresh clone: an existing checkout's origin is
+  # production, so fetching a fork's branch failed, `2>/dev/null` hid it, and we
+  # printed "Done." over a no-op. A whole Windows test ran against production
+  # main and the missing command looked like a rename bug.
+  CURRENT_ORIGIN=$(git -C "$PLUGIN_DIR" remote get-url origin 2>/dev/null || echo "")
+  if [ -n "$CURRENT_ORIGIN" ] && [ "$CURRENT_ORIGIN" != "$REPO_URL" ]; then
+    if git -C "$PLUGIN_DIR" remote set-url origin "$REPO_URL" 2>/dev/null; then
+      echo "  Re-pointed origin to $REPO_URL"
+    fi
+  fi
+  UPDATE_ERR=$(mktemp 2>/dev/null || echo "")
+  if git -C "$PLUGIN_DIR" fetch origin "$REPO_BRANCH" --quiet 2>"${UPDATE_ERR:-/dev/null}" \
+     && git -C "$PLUGIN_DIR" reset --hard "origin/$REPO_BRANCH" --quiet 2>>"${UPDATE_ERR:-/dev/null}"; then
+    :
+  else
+    # Loud, not silent: the install continues, but never claim it updated.
+    echo "  WARNING: could not update to '$REPO_BRANCH' — the existing checkout is UNCHANGED."
+    echo "           You are running whatever was already installed, not $REPO_BRANCH."
+    if [ -n "$UPDATE_ERR" ]; then
+      { tail -3 "$UPDATE_ERR" 2>/dev/null || true; } | sed 's/^/           /' || true
+    fi
+  fi
+  [ -n "$UPDATE_ERR" ] && rm -f "$UPDATE_ERR"
 else
   echo "  Cloning plugin..."
-  git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PLUGIN_DIR" --quiet
+  if ! git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PLUGIN_DIR" --quiet; then
+    echo "  ERROR: clone of '$REPO_BRANCH' from $REPO_URL failed."
+    exit 1
+  fi
 fi
+# Print exactly what landed. This is the installer's own receipt: with a silent
+# update failure it was impossible to tell which code you were running.
+# The commit, not the branch name: `reset --hard origin/<branch>` leaves the
+# LOCAL branch called "main" while holding another branch's content, so printing
+# the branch name actively misleads. The hash + subject is unambiguous.
+INSTALLED_REF=$(git -C "$PLUGIN_DIR" log -1 --format='%h %s' 2>/dev/null || echo "unknown")
+echo "  Installed commit: $INSTALLED_REF"
 echo "  Done."
 
 # --- Step 2: Enable the local plugin and register the auto-update hook in settings.json ---
