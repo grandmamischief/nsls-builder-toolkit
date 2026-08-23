@@ -165,19 +165,19 @@ if (Test-Path $PyExe) {
     # real pip failure (cert/proxy/Defender - "source could not be verified")
     # produced a bare "libraries missing" warning with no cause. The message is
     # the whole diagnostic; keep it and print it in the prereq report.
-    try {
-        $PipErr = (& $PyExe -m pip install --user python-docx python-pptx 2>&1 | Out-String)
-        if ($LASTEXITCODE -eq 0) { $PipErr = '' }
-    } catch { $PipErr = $_.Exception.Message }
+    # Invoke-Native, not a bare `2>&1`: pip writes routine WARNINGs to stderr,
+    # and under $ErrorActionPreference='Stop' PS 5.1 promotes redirected native
+    # stderr to a terminating error — a SUCCESSFUL install with a version-check
+    # warning would have been recorded as a failure.
+    $PipErr = Invoke-Native $PyExe @('-m', 'pip', 'install', '--user', 'python-docx', 'python-pptx')
+    if ($LASTEXITCODE -eq 0) { $PipErr = '' }
 
     # Fallback: --user fails on some machines (roaming profiles, PEP 668-ish
     # setups, locked-down site dirs). Retry into the SAME durable dir the
     # nsls-python shim already puts on PYTHONPATH, so a success here is usable.
     if ($PipErr) {
-        try {
-            $retry = (& $PyExe -m pip install --upgrade python-docx python-pptx --target $PyDepsDir 2>&1 | Out-String)
-            if ($LASTEXITCODE -eq 0) { $PipErr = '' } else { $PipErr += "`n--target retry also failed:`n$retry" }
-        } catch { $PipErr += "`n--target retry threw: $($_.Exception.Message)" }
+        $retry = Invoke-Native $PyExe @('-m', 'pip', 'install', '--upgrade', 'python-docx', 'python-pptx', '--target', $PyDepsDir)
+        if ($LASTEXITCODE -eq 0) { $PipErr = '' } else { $PipErr += "`n--target retry also failed:`n$retry" }
     }
 }
 
@@ -421,15 +421,20 @@ if (Test-Path (Join-Path $PluginDir '.git')) {
         Write-Host "  (Force it with: `$env:NSLS_TOOLKIT_BRANCH='$RepoBranch')"
         $skipUpdate = $true
     }
+    # Through Invoke-Native, never a bare `... 2>&1`: under
+    # $ErrorActionPreference='Stop' (set at the top), PowerShell 5.1 promotes
+    # redirected native stderr to a terminating NativeCommandError — so a failed
+    # fetch would kill the installer BEFORE the friendly warning below, which is
+    # the exact silent-death mode this block exists to prevent.
     $updateErr = ''
     if ($skipUpdate) {
         $updateOk = $true
     } else {
-        $updateErr = (& git -C $PluginDir fetch origin $RepoBranch --quiet 2>&1 | Out-String)
+        $updateErr = Invoke-Native 'git' @('-C', $PluginDir, 'fetch', 'origin', $RepoBranch, '--quiet')
         $updateOk  = ($LASTEXITCODE -eq 0)
     }
     if ($updateOk -and -not $skipUpdate) {
-        $updateErr += (& git -C $PluginDir reset --hard "origin/$RepoBranch" --quiet 2>&1 | Out-String)
+        $updateErr += "`n" + (Invoke-Native 'git' @('-C', $PluginDir, 'reset', '--hard', "origin/$RepoBranch", '--quiet'))
         $updateOk = ($LASTEXITCODE -eq 0)
     }
     if (-not $updateOk) {
